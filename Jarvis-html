@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>JARVIS — Always On</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div class="bg" id="bg"></div>
+
+<div class="hud">
+
+<!-- TOP -->
+<div class="topbar">
+  <div class="logo">JARVIS <span style="font-size:9px;opacity:.4;letter-spacing:3px;">v4.1</span></div>
+  <div class="top-mid">
+    <div class="state-badge idle" id="state-badge">IDLE</div>
+  </div>
+  <div class="top-right">
+    <div class="live-dot"></div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+</div>
+
+<!-- LEFT -->
+<div class="left">
+  <div class="panel">
+    <div class="plabel hot">◈ SYSTEM</div>
+    <div class="bar-row"><div class="bl">CPU</div><div class="bt"><div class="bf" id="cpu-b" style="width:42%"></div></div><div class="bv" id="cpu-v">42%</div></div>
+    <div class="bar-row"><div class="bl">RAM</div><div class="bt"><div class="bf" id="ram-b" style="width:64%;background:var(--neon3);box-shadow:0 0 5px var(--neon3)"></div></div><div class="bv" id="ram-v">64%</div></div>
+    <div class="bar-row"><div class="bl">GPU</div><div class="bt"><div class="bf" id="gpu-b" style="width:28%;background:var(--cyan);box-shadow:0 0 5px var(--cyan)"></div></div><div class="bv" id="gpu-v">28%</div></div>
+    <div class="bar-row"><div class="bl">NET</div><div class="bt"><div class="bf" id="net-b" style="width:75%"></div></div><div class="bv" id="net-v">75%</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">◈ SERVICES</div>
+    <div class="svc-row"><div class="dot on"></div><div class="sn">GROQ AI</div><div class="sv">ACTIVE</div></div>
+    <div class="svc-row"><div class="dot on"></div><div class="sn">FLASK :5000</div><div class="sv">ONLINE</div></div>
+    <div class="svc-row"><div class="dot on"></div><div class="sn">MIC INPUT</div><div class="sv" id="mic-status">READY</div></div>
+    <div class="svc-row"><div class="dot on"></div><div class="sn">WIFI</div><div class="sv">LINKED</div></div>
+    <div class="svc-row"><div class="dot warn"></div><div class="sn">BLUETOOTH</div><div class="sv">STANDBY</div></div>
+    <div class="svc-row"><div class="dot on"></div><div class="sn">TTS VOICE</div><div class="sv">READY</div></div>
+  </div>
+
+  <div class="panel" style="flex:1">
+    <div class="plabel">◈ AUDIO FREQ</div>
+    <div class="freq" id="freq"></div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">◈ BATTERY</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
+      <svg width="54" height="54" viewBox="0 0 54 54">
+        <circle cx="27" cy="27" r="22" fill="none" stroke="rgba(255,45,120,.12)" stroke-width="4"/>
+        <circle cx="27" cy="27" r="22" fill="none" stroke="var(--neon)" stroke-width="4"
+          stroke-dasharray="104 138" stroke-dashoffset="35" stroke-linecap="round"
+          style="filter:drop-shadow(0 0 4px var(--neon))"/>
+        <text x="27" y="31" text-anchor="middle" fill="var(--text)" font-family="Orbitron,sans-serif" font-size="9" id="batt-gauge">75%</text>
+      </svg>
+      <div>
+        <div style="font-size:9px;color:var(--dim);letter-spacing:1px;">STATUS</div>
+        <div style="font-size:10px;color:var(--green);margin-top:3px;" id="batt-status">CHARGING</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CENTER -->
+<div class="center">
+  <div class="orb-panel" id="orb-panel">
+    <div class="cb tl"></div><div class="cb tr"></div><div class="cb bl"></div><div class="cb br"></div>
+    <div class="orb-title">JARVIS</div>
+    <div class="hline" style="top:28%"></div>
+    <div class="hline" style="top:50%"></div>
+    <div class="hline" style="top:72%"></div>
+
+    <div class="orb-wrap" id="orb-wrap">
+      <div class="ping"></div>
+      <div class="ping ping2"></div>
+      <div class="ring r1"></div>
+      <div class="ring r2"></div>
+      <div class="ring r3"></div>
+      <div class="ring r4"></div>
+      <div class="core" id="core"></div>
+      <div class="inner"></div>
+    </div>
+
+    <div class="wave-bars" id="wave-bars"></div>
+    <div class="heard-txt" id="heard-txt"></div>
+
+    <div class="orb-stats">
+      <div class="ostat"><div class="osv" id="uptime">00:00:00</div><div class="osl">UPTIME</div></div>
+      <div class="ostat"><div class="osv" id="cmd-count">0</div><div class="osl">COMMANDS</div></div>
+      <div class="ostat"><div class="osv" id="latency-disp">--ms</div><div class="osl">LATENCY</div></div>
+    </div>
+  </div>
+
+  <div class="transcript">
+    <div class="transcript-msgs" id="transcript"></div>
+    <div class="err-notice" id="err-notice">⚠ Microphone access required — allow mic in browser, then reload</div>
+  </div>
+</div>
+
+<!-- RIGHT -->
+<div class="right">
+  <div class="panel">
+    <div class="plabel hot">◈ SESSION STATS</div>
+    <div class="stat-grid">
+      <div class="stat-cell"><div class="sc-val" id="s-cmds">0</div><div class="sc-lbl">COMMANDS</div></div>
+      <div class="stat-cell"><div class="sc-val" id="s-calls">0</div><div class="sc-lbl">API CALLS</div></div>
+      <div class="stat-cell"><div class="sc-val" id="s-tokens">0</div><div class="sc-lbl">TOKENS</div></div>
+      <div class="stat-cell"><div class="sc-val" id="s-lat">--</div><div class="sc-lbl">AVG MS</div></div>
+    </div>
+  </div>
+
+  <div class="panel" style="flex:1">
+    <div class="plabel">◈ ACTIVITY LOG</div>
+    <div class="log-area">
+      <div class="log-scroll" id="log"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">◈ MINI GAUGES</div>
+    <div class="mgauge-row">
+      <div class="mg">
+        <svg width="50" height="50" viewBox="0 0 50 50">
+          <circle cx="25" cy="25" r="19" fill="none" stroke="rgba(0,229,255,.12)" stroke-width="3"/>
+          <circle cx="25" cy="25" r="19" fill="none" stroke="var(--cyan)" stroke-width="3"
+            stroke-dasharray="72 119" stroke-dashoffset="30" stroke-linecap="round"
+            style="filter:drop-shadow(0 0 3px var(--cyan))" id="vol-arc"/>
+          <text x="25" y="29" text-anchor="middle" fill="var(--cyan)" font-family="Orbitron,sans-serif" font-size="8" id="vol-gval">60%</text>
+        </svg>
+        <div class="mg-lbl">VOLUME</div>
+      </div>
+      <div class="mg">
+        <svg width="50" height="50" viewBox="0 0 50 50">
+          <circle cx="25" cy="25" r="19" fill="none" stroke="rgba(255,183,0,.12)" stroke-width="3"/>
+          <circle cx="25" cy="25" r="19" fill="none" stroke="var(--amber)" stroke-width="3"
+            stroke-dasharray="84 119" stroke-dashoffset="30" stroke-linecap="round"
+            style="filter:drop-shadow(0 0 3px var(--amber))"/>
+          <text x="25" y="29" text-anchor="middle" fill="var(--amber)" font-family="Orbitron,sans-serif" font-size="8">70%</text>
+        </svg>
+        <div class="mg-lbl">BRIGHT</div>
+      </div>
+      <div class="mg">
+        <svg width="50" height="50" viewBox="0 0 50 50">
+          <circle cx="25" cy="25" r="19" fill="none" stroke="rgba(0,255,157,.12)" stroke-width="3"/>
+          <circle cx="25" cy="25" r="19" fill="none" stroke="var(--green)" stroke-width="3"
+            stroke-dasharray="96 119" stroke-dashoffset="30" stroke-linecap="round"
+            style="filter:drop-shadow(0 0 3px var(--green))"/>
+          <text x="25" y="29" text-anchor="middle" fill="var(--green)" font-family="Orbitron,sans-serif" font-size="8">80%</text>
+        </svg>
+        <div class="mg-lbl">NETWORK</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">◈ MODEL</div>
+    <div style="font-family:'Orbitron',sans-serif;font-size:9px;color:var(--text);letter-spacing:2px;margin-bottom:4px;">LLAMA3-70B</div>
+    <div style="font-size:8px;color:var(--dim);letter-spacing:1px;">GROQ · HINGLISH/EN · LOCAL</div>
+  </div>
+</div>
+
+<!-- BOTTOM -->
+<div class="bottombar">
+  <div style="display:flex;align-items:center;gap:14px;">
+    <div class="bb-seg"><div style="font-family:'Orbitron',sans-serif;font-size:14px;color:var(--neon);letter-spacing:4px;text-shadow:0 0 12px var(--neon);">JARVIS</div><div class="bb-lbl">PERSONAL AI SYSTEM</div></div>
+    <div class="bb-div"></div>
+    <div class="bb-seg"><div class="bb-val" id="date-str">-- --- ----</div><div class="bb-lbl">DATE</div></div>
+  </div>
+  <div class="bb-center">
+    <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
+    <div class="bb-status" id="bb-status">ALWAYS LISTENING · MIC ACTIVE</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:14px;">
+    <div class="bb-seg"><div class="bb-val">WINDOWS 11</div><div class="bb-lbl">PLATFORM</div></div>
+    <div class="bb-div"></div>
+    <div class="bb-seg"><div class="bb-val">ERA NEURAL</div><div class="bb-lbl">VOICE ENGINE</div></div>
+  </div>
+</div>
+
+</div><!-- /hud -->
+
+<script src="script.js"></script>
+</body>
+</html>
