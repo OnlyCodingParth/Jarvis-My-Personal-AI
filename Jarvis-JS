@@ -1,0 +1,346 @@
+// ═══════════════════════════════════════════════
+//  JARVIS — ALWAYS-ON VOICE CORE
+// ═══════════════════════════════════════════════
+const API = 'http://localhost:5000';
+
+// State
+let state = 'idle';     // idle | listening | processing | speaking
+let cmdCount = 0, apiCalls = 0, totalTokens = 0, latSum = 0;
+let recognition = null;
+let synth = window.speechSynthesis;
+let eraVoice = null;
+let isApiSpeaking = false;
+let startTime = Date.now();
+
+// ── CLOCK / UPTIME ──────────────────────────────
+function tick(){
+  const n = new Date();
+  document.getElementById('clock').textContent =
+    n.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  document.getElementById('date-str').textContent =
+    n.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}).toUpperCase();
+  const s=Math.floor((Date.now()-startTime)/1000);
+  document.getElementById('uptime').textContent =
+    String(Math.floor(s/3600)).padStart(2,'0')+':'+
+    String(Math.floor((s%3600)/60)).padStart(2,'0')+':'+
+    String(s%60).padStart(2,'0');
+}
+setInterval(tick,1000); tick();
+
+// ── FREQ BARS ────────────────────────────────────
+const freqEl = document.getElementById('freq');
+for(let i=0;i<18;i++){
+  const b=document.createElement('div');
+  b.className='fb';
+  b.style.height=(4+Math.random()*28)+'px';
+  freqEl.appendChild(b);
+}
+function animateFreq(active){
+  document.querySelectorAll('.fb').forEach(b=>{
+    const h = active ? (8+Math.random()*26) : (2+Math.random()*8);
+    b.style.height=h+'px';
+    b.style.background = active ? 'var(--green)' : 'var(--neon)';
+    b.style.boxShadow = active ? '0 0 4px var(--green)' : '0 0 3px var(--neon)';
+  });
+}
+setInterval(()=>animateFreq(state==='listening'),150);
+
+// ── WAVE BARS ────────────────────────────────────
+const waveEl = document.getElementById('wave-bars');
+for(let i=0;i<12;i++){
+  const b=document.createElement('div');
+  b.className='wb';
+  const h=6+Math.abs(6-i)*3;
+  b.style.height=h+'px';
+  waveEl.appendChild(b);
+}
+function animateWave(){
+  document.querySelectorAll('.wb').forEach(b=>{
+    b.style.height=(4+Math.random()*22)+'px';
+  });
+}
+let waveInterval=null;
+function startWave(){
+  waveEl.classList.add('visible');
+  waveInterval=setInterval(animateWave,100);
+}
+function stopWave(){
+  waveEl.classList.remove('visible');
+  clearInterval(waveInterval);
+}
+
+// ── SYSTEM METRICS FLICKER ───────────────────────
+function updateMetrics(){
+  const c=35+Math.floor(Math.random()*22),r=58+Math.floor(Math.random()*16),
+        g=20+Math.floor(Math.random()*18),n=68+Math.floor(Math.random()*22);
+  document.getElementById('cpu-b').style.width=c+'%'; document.getElementById('cpu-v').textContent=c+'%';
+  document.getElementById('ram-b').style.width=r+'%'; document.getElementById('ram-v').textContent=r+'%';
+  document.getElementById('gpu-b').style.width=g+'%'; document.getElementById('gpu-v').textContent=g+'%';
+  document.getElementById('net-b').style.width=n+'%'; document.getElementById('net-v').textContent=n+'%';
+}
+setInterval(updateMetrics,3500);
+
+// ── STATE MACHINE ────────────────────────────────
+function setState(s){
+  state=s;
+  const badge=document.getElementById('state-badge');
+  badge.className='state-badge '+s;
+  const labels={idle:'IDLE',listening:'LISTENING',processing:'PROCESSING',speaking:'SPEAKING'};
+  badge.textContent=labels[s]||s.toUpperCase();
+
+  const wrap=document.getElementById('orb-wrap');
+  wrap.className='orb-wrap';
+  if(s==='listening') wrap.classList.add('listening-mode');
+  if(s==='speaking')  wrap.classList.add('speaking-mode');
+
+  document.getElementById('bg').className='bg'+(s==='speaking'?' speaking':'');
+  document.getElementById('mic-status').textContent = s==='listening'?'ACTIVE':s==='processing'?'WAIT':'READY';
+
+  if(s==='speaking') startWave(); else stopWave();
+  setStatus(s==='listening'?'LISTENING — SPEAK NOW':s==='processing'?'PROCESSING COMMAND...':s==='speaking'?'JARVIS SPEAKING...':'ALWAYS LISTENING · READY');
+}
+
+// ── LOG ──────────────────────────────────────────
+function addLog(msg,type='inf'){
+  const ts=new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const d=document.createElement('div');
+  d.className='lline';
+  const ic=type==='ok'?'✓':type==='wn'?'⚠':'›';
+  d.innerHTML=`<span class="ts">[${ts}]</span> <span class="${type}">${ic}</span> ${msg}`;
+  const el=document.getElementById('log');
+  el.appendChild(d);
+  el.parentElement.scrollTop=el.scrollHeight;
+}
+
+// ── TRANSCRIPT ───────────────────────────────────
+function addMsg(role,text){
+  const d=document.createElement('div');
+  d.className='tmsg '+role;
+  d.textContent=text;
+  const el=document.getElementById('transcript');
+  el.appendChild(d);
+  el.scrollTop=el.scrollHeight;
+}
+function addSys(text){
+  const d=document.createElement('div');
+  d.className='tmsg sys';
+  d.textContent=text;
+  const el=document.getElementById('transcript');
+  el.appendChild(d);
+  el.scrollTop=el.scrollHeight;
+}
+
+// ── STATUS BAR ───────────────────────────────────
+function setStatus(msg){
+  document.getElementById('bb-status').textContent=msg;
+}
+let progAnim=null;
+function setProgress(pct,animate){
+  const el=document.getElementById('prog-fill');
+  clearInterval(progAnim);
+  if(animate){
+    let cur=0;
+    progAnim=setInterval(()=>{
+      cur+=2;if(cur>=pct){cur=pct;clearInterval(progAnim);}
+      el.style.width=cur+'%';
+    },16);
+  } else {
+    el.style.width=pct+'%';
+  }
+}
+
+// ── STATS ────────────────────────────────────────
+function updateStats(lat,tokens){
+  cmdCount++;apiCalls++;totalTokens+=tokens||0;latSum+=lat||0;
+  document.getElementById('cmd-count').textContent=cmdCount;
+  document.getElementById('s-cmds').textContent=cmdCount;
+  document.getElementById('s-calls').textContent=apiCalls;
+  document.getElementById('s-tokens').textContent=totalTokens;
+  const avg=Math.round(latSum/apiCalls);
+  document.getElementById('s-lat').textContent=avg;
+  document.getElementById('latency-disp').textContent=avg+'ms';
+}
+
+// ── BROWSER TTS (Era-style voice) ────────────────
+function pickEraVoice(){
+  const voices=synth.getVoices();
+  // Priority: Aria > Zira > Jenny > Eva > any female English
+  const priority=['aria','eva','jenny','zira','hazel','female'];
+  for(const kw of priority){
+    const v=voices.find(v=>v.name.toLowerCase().includes(kw)&&v.lang.startsWith('en'));
+    if(v){return v;}
+  }
+  // fallback: any English voice that's not obviously male
+  const male=['david','mark','george','james','guy','richard'];
+  return voices.find(v=>v.lang.startsWith('en')&&!male.some(m=>v.name.toLowerCase().includes(m)))
+         || voices.find(v=>v.lang.startsWith('en'))
+         || null;
+}
+synth.onvoiceschanged=()=>{eraVoice=pickEraVoice();};
+setTimeout(()=>{eraVoice=pickEraVoice();},500);
+
+function browserSpeak(text,onDone){
+  if(!text){if(onDone)onDone();return;}
+  synth.cancel();
+  const utt=new SpeechSynthesisUtterance(text);
+  utt.voice=eraVoice;
+  utt.rate=1.05;utt.pitch=1.0;utt.volume=1.0;
+  utt.onstart=()=>setState('speaking');
+  utt.onend=()=>{setState('idle');if(onDone)onDone();};
+  utt.onerror=()=>{setState('idle');if(onDone)onDone();};
+  synth.speak(utt);
+}
+
+// ── CALL JARVIS BACKEND ──────────────────────────
+async function callJarvis(text){
+  setState('processing');
+  setProgress(0);setProgress(40,true);
+  const t0=Date.now();
+  try{
+    const r=await fetch(API+'/command',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text})
+    });
+    const data=await r.json();
+    const lat=Date.now()-t0;
+    const reply=data.reply||'Done.';
+    const tokens=Math.floor((text.length+reply.length)/4);
+    setProgress(80);
+    addMsg('j',reply);
+    addLog('Reply: '+reply.substring(0,50),'ok');
+    updateStats(lat,tokens);
+    setProgress(100);
+    // Python backend also speaks via pyttsx3; browser speaks as fallback/simultaneous
+    browserSpeak(reply,()=>{
+      setTimeout(()=>startListening(),400);
+    });
+  } catch(e){
+    addLog('Backend offline — localhost:5000','wn');
+    setProgress(0);
+    const fallback='I am unable to reach the backend. Please start jarvis dot py.';
+    addMsg('j',fallback);
+    browserSpeak(fallback,()=>setTimeout(()=>startListening(),600));
+  }
+}
+
+// ── SPEECH RECOGNITION ───────────────────────────
+const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(!SpeechRecognition){
+  document.getElementById('err-notice').style.display='block';
+  document.getElementById('err-notice').textContent='⚠ Web Speech API not supported. Use Google Chrome.';
+  addSys('ERROR: Use Chrome for voice recognition.');
+} else {
+  setupRecognition();
+}
+
+function setupRecognition(){
+  recognition=new SpeechRecognition();
+  recognition.lang='en-IN';
+  recognition.continuous=false;
+  recognition.interimResults=true;
+  recognition.maxAlternatives=1;
+
+  recognition.onstart=()=>{
+    setState('listening');
+    addLog('Microphone open','ok');
+  };
+
+  recognition.onresult=(e)=>{
+    let interim='',final='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal) final+=e.results[i][0].transcript;
+      else interim+=e.results[i][0].transcript;
+    }
+    const show=(final||interim).trim();
+    if(show){
+      const ht=document.getElementById('heard-txt');
+      ht.textContent='"'+show+'"';
+      ht.classList.add('show');
+    }
+    if(final.trim()){
+      const cmd=final.trim().toLowerCase();
+      document.getElementById('heard-txt').classList.remove('show');
+      addMsg('u',final.trim());
+      addLog('Heard: '+final.trim());
+      // Stop + process
+      recognition.stop();
+      callJarvis(cmd);
+    }
+  };
+
+  recognition.onnomatch=()=>{
+    addLog('No match — retrying');
+    setTimeout(startListening,300);
+  };
+
+  recognition.onerror=(e)=>{
+    if(e.error==='no-speech'){
+      // silently restart
+      setTimeout(startListening,200);
+      return;
+    }
+    if(e.error==='not-allowed'||e.error==='denied'){
+      document.getElementById('err-notice').style.display='block';
+      setState('idle');
+      return;
+    }
+    addLog('Mic error: '+e.error,'wn');
+    setTimeout(startListening,1000);
+  };
+
+  recognition.onend=()=>{
+    // If we're not processing or speaking, keep listening
+    if(state==='listening'){
+      setTimeout(startListening,100);
+    }
+  };
+}
+
+function startListening(){
+  if(state==='processing'||state==='speaking'||isApiSpeaking) return;
+  if(!recognition) return;
+  try{
+    recognition.start();
+  } catch(e){
+    // already started — ignore
+  }
+}
+
+// ── BOOT SEQUENCE ────────────────────────────────
+function boot(){
+  addSys('[ JARVIS v4.1 BOOT SEQUENCE ]');
+  addLog('Initializing systems...','inf');
+
+  setTimeout(()=>{
+    addLog('Groq AI module loaded','ok');
+    setProgress(20,true);
+  },400);
+  setTimeout(()=>{
+    addLog('Voice engine ready','ok');
+    setProgress(50,true);
+  },800);
+  setTimeout(()=>{
+    addLog('Requesting microphone...','inf');
+    setProgress(75,true);
+  },1200);
+  setTimeout(()=>{
+    const h=new Date().getHours();
+    const greeting=h<12?'Good morning, sir. Jarvis is online and always listening.'
+      :h<17?'Good afternoon, sir. Jarvis is ready and listening.'
+      :'Good evening, sir. Jarvis is online. I am always here.';
+    addMsg('j',greeting);
+    addLog('Boot complete — always listening','ok');
+    setProgress(100);
+    browserSpeak(greeting,()=>{
+      setTimeout(()=>startListening(),300);
+    });
+  },1800);
+}
+
+// Start on page load
+window.addEventListener('load',()=>{
+  // Wait for voices to load
+  if(synth.getVoices().length>0){eraVoice=pickEraVoice();}
+  setTimeout(boot,600);
+});
