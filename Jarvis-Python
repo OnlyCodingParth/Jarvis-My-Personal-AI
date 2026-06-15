@@ -1,0 +1,786 @@
+"""
+╔══════════════════════════════════════════════════════════════╗
+║         JARVIS - Personal AI Assistant  v4.1                 ║
+║         Windows Only | Voice | English | Groq Powered        ║
+╚══════════════════════════════════════════════════════════════╝
+
+pip install groq speechrecognition pyttsx3 pyaudio pywhatkit python-dotenv
+pip install screen-brightness-control psutil comtypes pywin32 Pillow
+pip install flask flask-cors pycaw
+
+.env:  GROQ_API_KEY=your_key   USER_NAME=YourName
+Run:   python jarvis.py
+UI:    open jarvis.html in Chrome
+"""
+
+import os, re, json, time, glob, datetime, subprocess, webbrowser, random, threading
+
+import pyttsx3
+import speech_recognition as sr
+import pywhatkit
+import psutil
+from groq import Groq
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+try:
+    import screen_brightness_control as sbc; BRIGHTNESS_OK = True
+except ImportError:
+    BRIGHTNESS_OK = False
+
+try:
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    VOLUME_OK = True
+except ImportError:
+    VOLUME_OK = False
+
+try:
+    import PIL.ImageGrab as ImageGrab; SCREENSHOT_OK = True
+except ImportError:
+    SCREENSHOT_OK = False
+
+# ── CONFIG ───────────────────────────────────────────────────
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+ai_client    = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+GROQ_MODEL   = "llama3-70b-8192"
+PREFS_FILE   = "jarvis_prefs.json"
+
+conversation_history = []
+MAX_HISTORY = 10
+
+# Stateful session context
+session_ctx = {
+    "last_service" : None,
+    "wa_state"     : None,   # None | "ask_contact" | "ask_message" | "confirm"
+    "wa_contact"   : None,
+    "wa_message"   : None,
+    "yt_state"     : None,
+}
+
+SEARCH_URLS = {
+    "youtube"  : "https://www.youtube.com/results?search_query=",
+    "google"   : "https://www.google.com/search?q=",
+    "amazon"   : "https://www.amazon.in/s?k=",
+    "flipkart" : "https://www.flipkart.com/search?q=",
+    "instagram": "https://www.instagram.com/explore/tags/",
+    "github"   : "https://github.com/search?q=",
+    "wikipedia": "https://en.wikipedia.org/wiki/Special:Search?search=",
+    "netflix"  : "https://www.netflix.com/search?q=",
+    "spotify"  : "https://open.spotify.com/search/",
+    "maps"     : "https://maps.google.com/?q=",
+}
+
+APP_PATHS = {
+    "notepad"       : "notepad.exe",
+    "calculator"    : "calc.exe",
+    "paint"         : "mspaint.exe",
+    "chrome"        : r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "firefox"       : r"C:\Program Files\Mozilla Firefox\firefox.exe",
+    "word"          : r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
+    "excel"         : r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE",
+    "explorer"      : "explorer.exe",
+    "file explorer" : "explorer.exe",
+    "cmd"           : "cmd.exe",
+    "command prompt": "cmd.exe",
+    "task manager"  : "taskmgr.exe",
+    "vs code"       : r"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    "vscode"        : r"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    "vlc"           : r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+    "whatsapp"      : os.path.expanduser(r"~\AppData\Local\WhatsApp\WhatsApp.exe"),
+    "spotify"       : os.path.expanduser(r"~\AppData\Roaming\Spotify\Spotify.exe"),
+    "telegram"      : os.path.expanduser(r"~\AppData\Roaming\Telegram Desktop\Telegram.exe"),
+    "teams"         : os.path.expanduser(r"~\AppData\Local\Microsoft\Teams\current\Teams.exe"),
+    "zoom"          : os.path.expanduser(r"~\AppData\Roaming\Zoom\bin\Zoom.exe"),
+}
+
+STORE_APPS = {
+    "whatsapp"  : "whatsapp:",
+    "instagram" : "instagram:",
+    "spotify"   : "spotify:",
+    "netflix"   : "netflix:",
+    "calculator": "calculator:",
+    "photos"    : "ms-photos:",
+    "settings"  : "ms-settings:",
+    "store"     : "ms-windows-store:",
+}
+
+WEBSITES = {
+    "youtube"    : "https://www.youtube.com",
+    "google"     : "https://www.google.com",
+    "gmail"      : "https://mail.google.com",
+    "github"     : "https://www.github.com",
+    "linkedin"   : "https://www.linkedin.com",
+    "twitter"    : "https://www.twitter.com",
+    "instagram"  : "https://www.instagram.com",
+    "netflix"    : "https://www.netflix.com",
+    "amazon"     : "https://www.amazon.in",
+    "flipkart"   : "https://www.flipkart.com",
+    "wikipedia"  : "https://www.wikipedia.org",
+    "whatsapp"   : "https://web.whatsapp.com",
+    "chatgpt"    : "https://chat.openai.com",
+    "spotify"    : "https://open.spotify.com",
+    "maps"       : "https://maps.google.com",
+    "reddit"     : "https://www.reddit.com",
+    "stackoverflow":"https://stackoverflow.com",
+}
+
+FOLDERS = {
+    "downloads": os.path.expanduser("~/Downloads"),
+    "documents": os.path.expanduser("~/Documents"),
+    "desktop"  : os.path.expanduser("~/Desktop"),
+    "pictures" : os.path.expanduser("~/Pictures"),
+    "music"    : os.path.expanduser("~/Music"),
+    "videos"   : os.path.expanduser("~/Videos"),
+    "appdata"  : os.path.expanduser("~/AppData"),
+}
+
+# ── TTS — ERA-STYLE VOICE ────────────────────────────────────
+tts_engine = pyttsx3.init()
+
+# Voice priority: Microsoft Aria (neural) > Zira > Jenny > Eva > any English female
+VOICE_SCORE = {
+    "aria"   : 120,   # Microsoft Aria Neural — closest to "Era"
+    "eva"    : 115,   # Some systems have Eva
+    "jenny"  : 110,
+    "zira"   : 100,
+    "hazel"  : 90,
+    "female" : 80,
+    "woman"  : 80,
+    "neural" : 75,
+    "english": 50,
+    "en"     : 40,
+}
+
+def _score_voice(v):
+    name_lower = v.name.lower()
+    lang_lower = (v.languages[0].lower() if v.languages else "")
+    combo = name_lower + " " + lang_lower
+    # Prefer female voices — skip voices with male-only names
+    if any(m in name_lower for m in ["david", "mark", "george", "james", "guy", "richard"]):
+        return -1
+    return max((pts for kw, pts in VOICE_SCORE.items() if kw in combo), default=0)
+
+def configure_voice():
+    voices = tts_engine.getProperty("voices")
+    if not voices: return
+    best = sorted(voices, key=_score_voice, reverse=True)[0]
+    tts_engine.setProperty("voice", best.id)
+    # Era-style: clear, bright, slightly faster than default, confident
+    tts_engine.setProperty("rate",   158)   # slightly brisk, natural
+    tts_engine.setProperty("volume", 0.97)
+    print(f"✅ Voice: {best.name}")
+
+configure_voice()
+
+DONE  = ["Done, sir.", "Done.", "Consider it done.", "All set.", "Sorted."]
+READY = ["I'm listening.", "Yes, sir.", "Go ahead.", "Listening."]
+WAIT  = ["What's next?", "Anything else?", "I'm here.", "Ready."]
+
+def speak(text: str):
+    print(f"\n🤖 Jarvis: {text}\n")
+    tts_engine.say(text); tts_engine.runAndWait()
+
+def speak_done():      speak(random.choice(DONE))
+def speak_listening(): speak(random.choice(READY))
+def speak_waiting():   speak(random.choice(WAIT))
+
+# ── LISTEN ───────────────────────────────────────────────────
+recognizer = sr.Recognizer()
+recognizer.pause_threshold = 0.8
+
+def listen(prompt=None, timeout=7):
+    if prompt: speak(prompt)
+    with sr.Microphone() as src:
+        print("🎤 Listening...")
+        recognizer.adjust_for_ambient_noise(src, duration=0.5)
+        try: audio = recognizer.listen(src, timeout=timeout, phrase_time_limit=15)
+        except sr.WaitTimeoutError: return ""
+    for lang in ["en-IN", "en-US"]:
+        try:
+            text = recognizer.recognize_google(audio, language=lang)
+            print(f"👤 [{lang}]: {text}"); return text.lower().strip()
+        except sr.UnknownValueError: continue
+        except sr.RequestError: speak("Speech service is down."); return ""
+    return ""
+
+# ── WAKE WORD ────────────────────────────────────────────────
+recognizer.pause_threshold = 0.7
+WAKE_WORDS  = ["jarvis", "jaarvis", "jarwis", "jarbes"]
+SESSION_END = ["stop", "bye", "goodbye", "exit", "sleep", "done"]
+FULL_EXIT   = ["shutdown jarvis", "jarvis quit", "close jarvis", "terminate jarvis"]
+
+def listen_for_wake_word():
+    print('👂 Sleeping... say "Jarvis" to wake.')
+    dots = 0
+    while True:
+        with sr.Microphone() as src:
+            recognizer.adjust_for_ambient_noise(src, duration=0.3)
+            try: audio = recognizer.listen(src, timeout=4, phrase_time_limit=4)
+            except sr.WaitTimeoutError:
+                dots += 1
+                if dots % 4 == 0: print("   ... still listening")
+                continue
+        try:
+            heard = recognizer.recognize_google(audio, language="en-IN").lower()
+            if any(w in heard for w in WAKE_WORDS): print("✅ Wake word!\n"); return True
+        except: continue
+
+def listen_for_command(timeout=8):
+    with sr.Microphone() as src:
+        print("🎤 Command?")
+        recognizer.adjust_for_ambient_noise(src, duration=0.4)
+        try: audio = recognizer.listen(src, timeout=timeout, phrase_time_limit=15)
+        except sr.WaitTimeoutError: return ""
+    for lang in ["en-IN", "en-US"]:
+        try: return recognizer.recognize_google(audio, language=lang).lower().strip()
+        except sr.UnknownValueError: continue
+        except: return ""
+    return ""
+
+is_session_end = lambda t: any(w in t for w in SESSION_END)
+is_full_exit   = lambda t: any(w in t for w in FULL_EXIT)
+
+# ── PREFS ────────────────────────────────────────────────────
+def load_prefs():
+    if os.path.exists(PREFS_FILE):
+        with open(PREFS_FILE) as f: return json.load(f)
+    return {"name": os.getenv("USER_NAME", "Boss"), "language": "english",
+            "whatsapp_contacts": {}, "greeting_count": 0}
+
+def save_prefs(p):
+    with open(PREFS_FILE, "w") as f: json.dump(p, f, indent=2)
+
+prefs = load_prefs()
+
+# ── SYSTEM CONTROL ───────────────────────────────────────────
+def get_volume():
+    if VOLUME_OK:
+        try:
+            d = AudioUtilities.GetSpeakers()
+            i = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            return int(cast(i, POINTER(IAudioEndpointVolume)).GetMasterVolumeLevelScalar() * 100)
+        except: pass
+    return -1
+
+def set_volume(level):
+    level = max(0, min(100, level))
+    if VOLUME_OK:
+        try:
+            d = AudioUtilities.GetSpeakers()
+            i = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            cast(i, POINTER(IAudioEndpointVolume)).SetMasterVolumeLevelScalar(level / 100, None)
+            return f"Volume set to {level}%!"
+        except: pass
+    try: subprocess.run(["nircmd.exe", "setsysvolume", str(int(level * 655.35))], capture_output=True); return f"Volume {level}%!"
+    except: return "Could not set volume."
+
+def change_volume(direction, amount=10):
+    if VOLUME_OK:
+        try:
+            d = AudioUtilities.GetSpeakers()
+            i = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            vol = cast(i, POINTER(IAudioEndpointVolume))
+            cur = vol.GetMasterVolumeLevelScalar() * 100
+            nv  = min(100, cur + amount) if direction == "up" else max(0, cur - amount)
+            vol.SetMasterVolumeLevelScalar(nv / 100, None)
+            return f"Volume at {int(nv)}%!"
+        except: pass
+    key  = chr(175) if direction == "up" else chr(174)
+    keys = key * (amount // 2)
+    subprocess.run(["powershell", "-Command", f"$w=New-Object -ComObject WScript.Shell;$w.SendKeys('{keys}')"], capture_output=True)
+    return f"Volume {'increased' if direction == 'up' else 'decreased'}!"
+
+def mute_volume():
+    subprocess.run(["powershell", "-Command", "$w=New-Object -ComObject WScript.Shell;$w.SendKeys([char]173)"], capture_output=True)
+    return "Muted!"
+
+def set_brightness(level):
+    level = max(0, min(100, level))
+    if BRIGHTNESS_OK:
+        try: sbc.set_brightness(level); return f"Brightness set to {level}%!"
+        except: pass
+    subprocess.run(["powershell", "-Command", f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{level})"], capture_output=True)
+    return f"Brightness {level}%!"
+
+def get_brightness():
+    if BRIGHTNESS_OK:
+        try:
+            b = sbc.get_brightness()
+            return f"Brightness is at {b[0] if isinstance(b, list) else b}%."
+        except: pass
+    return "Could not retrieve brightness info."
+
+def get_battery():
+    b = psutil.sensors_battery()
+    if b:
+        pct  = int(b.percent)
+        plug = "charging" if b.power_plugged else "on battery"
+        note = ""
+        if pct <= 15 and not b.power_plugged: note = " Please plug in your charger, sir."
+        elif pct == 100: note = " Fully charged."
+        return f"Battery at {pct}%, {plug}.{note}"
+    return "Battery information unavailable."
+
+def shutdown_laptop(delay=0):
+    speak("Should I shut down? Say yes to confirm.")
+    c = listen(timeout=6)
+    if any(w in c for w in ["yes", "ok", "sure", "confirm"]):
+        subprocess.run(["shutdown", "/s", "/t", str(delay)]); return f"Shutting down in {delay} seconds. Goodbye!"
+    return "Shutdown cancelled."
+
+def restart_laptop(delay=0):
+    speak("Restart? Say yes to confirm.")
+    c = listen(timeout=6)
+    if any(w in c for w in ["yes", "ok", "sure", "confirm"]):
+        subprocess.run(["shutdown", "/r", "/t", str(delay)]); return f"Restarting in {delay} seconds!"
+    return "Restart cancelled."
+
+def sleep_laptop():
+    subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]); return "Going to sleep!"
+
+def lock_screen():
+    subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"]); return "Screen locked. Don't forget your password."
+
+def wifi_on():    subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", "enabled"], capture_output=True); return "Wi-Fi enabled!"
+def wifi_off():   subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", "disabled"], capture_output=True); return "Wi-Fi disabled!"
+def wifi_status():
+    r = subprocess.run(["netsh", "interface", "show", "interface", "Wi-Fi"], capture_output=True, text=True)
+    return "Wi-Fi is connected!" if "Connected" in r.stdout or "Enabled" in r.stdout else "Wi-Fi is off or disconnected."
+
+def bluetooth_on():  _bt("On");  return "Bluetooth on! Please confirm in Settings."
+def bluetooth_off(): _bt("Off"); return "Bluetooth off!"
+def _bt(state):
+    subprocess.run(["powershell", "-Command",
+        f"Add-Type -AssemblyName System.Runtime.WindowsRuntime;"
+        f"$r=[Windows.Devices.Radios.Radio,Windows.System.Devices,ContentType=WindowsRuntime];"
+        f"$b=($r::GetRadiosAsync()|%{{$_.GetResults()}})|?{{$_.Kind -eq 'Bluetooth'}};"
+        f"if($b){{$b.SetStateAsync('{state}')}}"], capture_output=True)
+
+def take_screenshot():
+    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.expanduser(f"~/Pictures/screenshot_{ts}.png")
+    if SCREENSHOT_OK: ImageGrab.grab().save(path)
+    else:
+        subprocess.run(["powershell", "-Command",
+            f"Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+            f"$b=New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width,"
+            f"[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height);"
+            f"$g=[System.Drawing.Graphics]::FromImage($b);$g.CopyFromScreen(0,0,0,0,$b.Size);"
+            f"$b.Save('{path}')"], capture_output=True)
+    return f"Screenshot saved: Pictures/screenshot_{ts}.png"
+
+def close_app(app_name):
+    PM = {"chrome": "chrome.exe", "firefox": "firefox.exe", "notepad": "notepad.exe", "vlc": "vlc.exe",
+          "word": "WINWORD.EXE", "excel": "EXCEL.EXE", "vs code": "Code.exe", "vscode": "Code.exe",
+          "spotify": "Spotify.exe", "whatsapp": "WhatsApp.exe", "teams": "Teams.exe", "zoom": "Zoom.exe",
+          "discord": "Discord.exe", "telegram": "Telegram.exe", "calculator": "CalculatorApp.exe",
+          "paint": "mspaint.exe", "cmd": "cmd.exe", "edge": "msedge.exe"}
+    proc = PM.get(app_name.lower().strip(), app_name + ".exe")
+    r    = subprocess.run(["taskkill", "/F", "/IM", proc], capture_output=True, text=True)
+    return f"{app_name} closed!" if r.returncode == 0 else f"Could not find {app_name}."
+
+def list_running_apps():
+    procs  = [p.info['name'] for p in psutil.process_iter(['name']) if p.info['name'] and not p.info['name'].startswith("svchost")]
+    unique = list(dict.fromkeys(procs))[:10]
+    return "Currently running: " + ", ".join(unique)
+
+def get_system_info():
+    cpu = psutil.cpu_percent(interval=1)
+    ram = psutil.virtual_memory()
+    dsk = psutil.disk_usage('/')
+    return f"CPU at {cpu}%, RAM {ram.used/1e9:.1f}/{ram.total/1e9:.1f} GB, Disk {dsk.used/1e9:.1f}/{dsk.total/1e9:.1f} GB."
+
+# ── APP LAUNCHER ─────────────────────────────────────────────
+def open_app_smart(app_name):
+    al = app_name.lower().strip()
+    session_ctx["last_service"] = al
+
+    # 1) Known exe
+    exe = APP_PATHS.get(al, "")
+    if exe:
+        matches = glob.glob(os.path.expandvars(exe))
+        path    = matches[0] if matches else os.path.expandvars(exe)
+        if os.path.exists(path):
+            try: subprocess.Popen(path); return f"{app_name} opened! (desktop app)"
+            except Exception as e: print(f"⚠️ {e}")
+
+    # 2) Store URI
+    if al in STORE_APPS:
+        try: os.startfile(STORE_APPS[al]); return f"{app_name} launched! (store)"
+        except: pass
+
+    # 3) Shortcut
+    for folder in [os.path.expanduser("~/Desktop"),
+                   os.path.expanduser("~/AppData/Roaming/Microsoft/Windows/Start Menu/Programs"),
+                   r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"]:
+        ms = glob.glob(os.path.join(folder, "**", f"*{al}*.lnk"), recursive=True)
+        if ms:
+            try: os.startfile(ms[0]); return f"{app_name} opened via shortcut!"
+            except: pass
+
+    # 4) Browser fallback
+    url = WEBSITES.get(al)
+    if url:
+        webbrowser.open(url)
+        return f"{app_name} opened in browser (desktop app not found)."
+
+    return f"Could not find '{app_name}'. Please add it to APP_PATHS."
+
+def open_folder(folder_name):
+    fl   = folder_name.lower().strip()
+    path = FOLDERS.get(fl)
+    if path and os.path.exists(path):
+        os.startfile(path); return f"{folder_name} folder opened!"
+    for k, p in FOLDERS.items():
+        if (k in fl or fl in k) and os.path.exists(p):
+            os.startfile(p); return f"{k} folder opened!"
+    return f"Could not find folder '{folder_name}'."
+
+# ── SEARCH ───────────────────────────────────────────────────
+def smart_search(query, service=None):
+    target   = (service or session_ctx.get("last_service") or "google").lower()
+    base_url = SEARCH_URLS.get(target)
+    if base_url:
+        webbrowser.open(base_url + query.replace(" ", "+")); return f"Searching '{query}' on {target}!"
+    webbrowser.open(f"https://www.google.com/search?q={query.replace(' ', '+')}"); return f"Google search: '{query}'"
+
+def detect_search_service(text):
+    for s in SEARCH_URLS:
+        if s in text: return s
+    return None
+
+def extract_search_query(text):
+    REMOVE = ["search on youtube", "search in youtube", "search youtube for", "search on google",
+              "search google for", "search on amazon", "search amazon for", "search on spotify",
+              "search on netflix", "search on flipkart", "search for", "search", "find", "look up",
+              "on youtube", "on google", "on amazon", "in youtube", "in google"]
+    q = text
+    for ph in REMOVE: q = q.replace(ph, "").strip()
+    return q.strip()
+
+# ── STATEFUL WHATSAPP ────────────────────────────────────────
+def _reset_wa():
+    session_ctx.update({"wa_state": None, "wa_contact": None, "wa_message": None})
+
+def handle_whatsapp_flow(text):
+    ctx = session_ctx
+    t   = text.lower().strip()
+    if ctx["wa_state"] is None: return None
+
+    if ctx["wa_state"] == "ask_contact":
+        ctx["wa_contact"] = text.strip(); ctx["wa_state"] = "ask_message"
+        return f"Got it — what would you like to say to {ctx['wa_contact']}?"
+
+    if ctx["wa_state"] == "ask_message":
+        ctx["wa_message"] = text.strip(); ctx["wa_state"] = "confirm"
+        return f'Confirm: send "{ctx["wa_message"]}" to {ctx["wa_contact"]}? Yes or No?'
+
+    if ctx["wa_state"] == "confirm":
+        if any(w in t for w in ["yes", "ok", "sure", "confirm", "send", "yeah"]):
+            c, m = ctx["wa_contact"], ctx["wa_message"]
+            _reset_wa(); return _do_send_wa(c, m)
+        _reset_wa(); return "Message cancelled."
+
+    _reset_wa(); return None
+
+def _do_send_wa(contact_name, message):
+    phone = prefs.get("whatsapp_contacts", {}).get(contact_name.lower())
+    if not phone:
+        return f"No number found for '{contact_name}'. Please add it to whatsapp_contacts in {PREFS_FILE}."
+    try:
+        n = datetime.datetime.now()
+        h, m = n.hour, n.minute + 1
+        if m >= 60: m, h = 0, (h + 1) % 24
+        pywhatkit.sendwhatmsg(phone, message, h, m, wait_time=20, tab_close=True, close_time=5)
+        return f"Message sent to {contact_name}!"
+    except Exception as e:
+        print(f"❌ pywhatkit: {e}"); return "Message failed. Is WhatsApp Web open and logged in?"
+
+# ── GROQ FUNCTION DEFINITIONS ────────────────────────────────
+GROQ_FUNCTIONS = [
+    {"name": "open_application", "description": "Open an app/website/service on Windows (prefer desktop app).",
+     "parameters": {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}},
+    {"name": "open_folder", "description": "Open a Windows folder (Downloads/Documents/Desktop/Pictures/Music/Videos). Never redirect to browser.",
+     "parameters": {"type": "object", "properties": {"folder_name": {"type": "string"}}, "required": ["folder_name"]}},
+    {"name": "search_service", "description": "Search on YouTube/Google/Amazon etc.",
+     "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "service": {"type": "string", "description": "youtube/google/amazon/spotify/netflix/wikipedia/flipkart/maps"}}, "required": ["query"]}},
+    {"name": "youtube_search", "description": "Open YouTube and search for a video or channel.",
+     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "get_time", "description": "Get current time and date.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "send_whatsapp", "description": "Send WhatsApp message to a contact.",
+     "parameters": {"type": "object", "properties": {"contact_name": {"type": "string"}, "message": {"type": "string"}}, "required": ["contact_name", "message"]}},
+    {"name": "start_whatsapp_flow", "description": "Start conversational WhatsApp flow to collect contact and message.",
+     "parameters": {"type": "object", "properties": {"contact_name": {"type": "string"}, "message": {"type": "string"}}}},
+    {"name": "control_volume", "description": "Volume set/up/down/mute/get.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["set", "up", "down", "mute", "get"]}, "level": {"type": "integer"}, "amount": {"type": "integer"}}, "required": ["action"]}},
+    {"name": "control_brightness", "description": "Screen brightness set/get.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["set", "get"]}, "level": {"type": "integer"}}, "required": ["action"]}},
+    {"name": "get_battery", "description": "Battery status.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "power_control", "description": "Shutdown/restart/sleep/lock.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["shutdown", "restart", "sleep", "lock"]}, "delay": {"type": "integer"}}, "required": ["action"]}},
+    {"name": "control_wifi", "description": "WiFi on/off/status.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["on", "off", "status"]}}, "required": ["action"]}},
+    {"name": "control_bluetooth", "description": "Bluetooth on/off.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["on", "off"]}}, "required": ["action"]}},
+    {"name": "take_screenshot", "description": "Take a screenshot.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "close_application", "description": "Close a running app.",
+     "parameters": {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}},
+    {"name": "get_system_info", "description": "CPU/RAM/disk info.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "list_running_apps", "description": "List running apps.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "remember_preference", "description": "Save a preference.",
+     "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}},
+]
+
+# ── FUNCTION EXECUTOR ────────────────────────────────────────
+def execute_function(func_name, func_args):
+    if func_name == "open_application":       return open_app_smart(func_args.get("app_name", ""))
+    if func_name == "open_folder":            return open_folder(func_args.get("folder_name", ""))
+    if func_name == "search_service":         return smart_search(func_args.get("query", ""), func_args.get("service"))
+    if func_name == "youtube_search":
+        q = func_args.get("query", "")
+        webbrowser.open(SEARCH_URLS["youtube"] + q.replace(" ", "+")); session_ctx["last_service"] = "youtube"
+        return f"Searching '{q}' on YouTube!"
+    if func_name == "get_time":
+        n = datetime.datetime.now(); return f"It's {n.strftime('%I:%M %p')}, {n.strftime('%A, %d %B %Y')}."
+    if func_name == "send_whatsapp":
+        c, m = func_args.get("contact_name", ""), func_args.get("message", "")
+        if c and m: return _do_send_wa(c, m)
+        session_ctx["wa_state"] = "ask_contact" if not c else "ask_message"
+        if c: session_ctx["wa_contact"] = c
+        return "Who should I message?" if not c else f"What would you like to say to {c}?"
+    if func_name == "start_whatsapp_flow":
+        c, m = func_args.get("contact_name", ""), func_args.get("message", "")
+        if c and m:
+            session_ctx.update({"wa_state": "confirm", "wa_contact": c, "wa_message": m})
+            return f'Confirm: send "{m}" to {c}? Yes or No?'
+        session_ctx["wa_state"] = "ask_contact" if not c else "ask_message"
+        if c: session_ctx["wa_contact"] = c
+        return "Who should I message?" if not c else f"What would you like to say to {c}?"
+    if func_name == "control_volume":
+        a = func_args.get("action", "get")
+        if a == "set":  return set_volume(func_args.get("level", 50))
+        if a == "up":   return change_volume("up",   func_args.get("amount", 10))
+        if a == "down": return change_volume("down", func_args.get("amount", 10))
+        if a == "mute": return mute_volume()
+        v = get_volume(); return f"Volume is at {v}%." if v >= 0 else "Could not read volume."
+    if func_name == "control_brightness":
+        return set_brightness(func_args.get("level", 70)) if func_args.get("action") == "set" else get_brightness()
+    if func_name == "get_battery":         return get_battery()
+    if func_name == "power_control":
+        a = func_args.get("action", ""); d = func_args.get("delay", 0)
+        if a == "shutdown": return shutdown_laptop(d)
+        if a == "restart":  return restart_laptop(d)
+        if a == "sleep":    return sleep_laptop()
+        if a == "lock":     return lock_screen()
+    if func_name == "control_wifi":
+        a = func_args.get("action", "status")
+        return wifi_on() if a == "on" else wifi_off() if a == "off" else wifi_status()
+    if func_name == "control_bluetooth":
+        return bluetooth_on() if func_args.get("action", "on") == "on" else bluetooth_off()
+    if func_name == "take_screenshot":     return take_screenshot()
+    if func_name == "close_application":   return close_app(func_args.get("app_name", ""))
+    if func_name == "get_system_info":     return get_system_info()
+    if func_name == "list_running_apps":   return list_running_apps()
+    if func_name == "remember_preference":
+        k, v = func_args.get("key", ""), func_args.get("value", "")
+        prefs[k] = v; save_prefs(prefs); return f"Noted: {k} = {v}."
+    return "I didn't understand that command."
+
+# ── ASK JARVIS ───────────────────────────────────────────────
+def ask_jarvis(user_text: str) -> str:
+    global conversation_history
+    t = user_text.lower().strip()
+
+    # Stateful flow handlers (intercept before AI)
+    if session_ctx["wa_state"]:
+        reply = handle_whatsapp_flow(user_text)
+        if reply:
+            conversation_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+            return reply
+
+    # YouTube search shortcut
+    if re.search(r"\byoutube\b", t) and re.search(r"\bsearch\b|\bplay\b|\bfind\b", t):
+        q = extract_search_query(t.replace("youtube", "").strip())
+        if q:
+            webbrowser.open(SEARCH_URLS["youtube"] + q.replace(" ", "+")); session_ctx["last_service"] = "youtube"
+            reply = f"Searching '{q}' on YouTube!"
+        else:
+            session_ctx["yt_state"] = "ask_query"
+            reply = "What should I search on YouTube?"
+        conversation_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        return reply
+
+    if session_ctx["yt_state"] == "ask_query":
+        session_ctx["yt_state"] = None; session_ctx["last_service"] = "youtube"
+        webbrowser.open(SEARCH_URLS["youtube"] + user_text.replace(" ", "+"))
+        reply = f"Searching '{user_text}' on YouTube!"
+        conversation_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        return reply
+
+    # AI path
+    name      = prefs.get("name", "Boss")
+    sysprompt = f"""You are Jarvis, a smart personal AI assistant for Windows. User: {name}. Speak in clear English.
+PERSONALITY: warm, witty, professional. Max 2 sentence replies. ALWAYS use function calls.
+
+RULES:
+- open <app>         → open_application (prefer desktop app, fallback browser)
+- open <folder>      → open_folder (NEVER browser)
+- search youtube     → youtube_search
+- whatsapp message   → start_whatsapp_flow
+- volume/brightness/battery/power/wifi/bluetooth/screenshot/sysinfo → correct function
+Context: {session_ctx.get('last_service') or 'none'}"""
+
+    conversation_history.append({"role": "user", "content": user_text})
+    if len(conversation_history) > MAX_HISTORY * 2:
+        conversation_history = conversation_history[-(MAX_HISTORY * 2):]
+
+    if not ai_client:
+        r = handle_basic_commands(user_text); conversation_history.append({"role": "assistant", "content": r}); return r
+
+    try:
+        msgs = [{"role": "system", "content": sysprompt}] + conversation_history
+        resp = ai_client.chat.completions.create(
+            model=GROQ_MODEL, messages=msgs,
+            tools=[{"type": "function", "function": f} for f in GROQ_FUNCTIONS],
+            tool_choice="auto", max_tokens=400)
+        msg = resp.choices[0].message
+        if msg.tool_calls:
+            tc = msg.tool_calls[0]
+            fn, fa = tc.function.name, json.loads(tc.function.arguments)
+            print(f"⚙️  {fn}({fa})")
+            result = execute_function(fn, fa)
+            conversation_history += [{"role": "assistant", "content": None, "tool_calls": [tc.model_dump()]},
+                                      {"role": "tool", "tool_call_id": tc.id, "content": result}]
+            return result
+        reply = (msg.content or "").strip() or "I didn't quite catch that."
+        conversation_history.append({"role": "assistant", "content": reply}); return reply
+    except Exception as e:
+        print(f"❌ Groq: {e}")
+        fb = handle_basic_commands(user_text); conversation_history.append({"role": "assistant", "content": fb}); return fb
+
+# ── BASIC FALLBACK ───────────────────────────────────────────
+def handle_basic_commands(text):
+    t = text.lower()
+    if any(w in t for w in ["time", "date", "what time", "what day"]):
+        n = datetime.datetime.now(); return f"It's {n.strftime('%I:%M %p')}, {n.strftime('%A, %d %B %Y')}."
+    if any(w in t for w in ["battery", "charge"]): return get_battery()
+    if any(w in t for w in ["volume", "sound"]):
+        nums = re.findall(r'\d+', t)
+        if any(w in t for w in ["increase", "up", "louder", "raise"]): return change_volume("up",   int(nums[0]) if nums else 10)
+        if any(w in t for w in ["decrease", "down", "lower", "reduce"]): return change_volume("down", int(nums[0]) if nums else 10)
+        if any(w in t for w in ["mute", "silence", "quiet"]): return mute_volume()
+        if nums: return set_volume(int(nums[0]))
+        v = get_volume(); return f"Volume is at {v}%." if v >= 0 else "Could not read volume."
+    if any(w in t for w in ["brightness"]):
+        nums = re.findall(r'\d+', t); return set_brightness(int(nums[0])) if nums else get_brightness()
+    if any(w in t for w in ["shutdown", "turn off"]):  return shutdown_laptop()
+    if any(w in t for w in ["restart", "reboot"]):     return restart_laptop()
+    if any(w in t for w in ["sleep", "hibernate"]):    return sleep_laptop()
+    if any(w in t for w in ["lock", "screen lock"]):   return lock_screen()
+    if "wifi" in t or "wi-fi" in t:
+        if any(w in t for w in ["on", "enable"]): return wifi_on()
+        if any(w in t for w in ["off", "disable"]): return wifi_off()
+        return wifi_status()
+    if "bluetooth" in t: return bluetooth_on() if any(w in t for w in ["on", "enable"]) else bluetooth_off()
+    if any(w in t for w in ["screenshot", "capture screen"]): return take_screenshot()
+    if any(w in t for w in ["system info", "cpu", "ram", "disk"]): return get_system_info()
+    if any(w in t for w in ["running apps", "list apps", "what's open"]): return list_running_apps()
+    if any(w in t for w in ["close", "kill", "quit"]):
+        for app in ["chrome", "firefox", "notepad", "vlc", "spotify", "whatsapp", "teams", "word", "excel", "edge"]:
+            if app in t: return close_app(app)
+    # Folders first
+    for folder, path in FOLDERS.items():
+        if folder in t and os.path.exists(path): os.startfile(path); return f"{folder} folder opened!"
+    # YouTube
+    if "youtube" in t:
+        q = extract_search_query(t)
+        if q: webbrowser.open(SEARCH_URLS["youtube"] + q.replace(" ", "+")); return f"YouTube search: '{q}'"
+        webbrowser.open(WEBSITES["youtube"]); return "YouTube opened!"
+    # Search
+    if any(w in t for w in ["search", "find", "look up"]):
+        svc = detect_search_service(t); q = extract_search_query(t)
+        if q: return smart_search(q, svc)
+        return "What should I search for?"
+    # Sites
+    for site, url in WEBSITES.items():
+        if site in t: webbrowser.open(url); session_ctx["last_service"] = site; return f"{site} opened!"
+    # Apps
+    for app in APP_PATHS:
+        if app in t: return open_app_smart(app)
+    if any(w in t for w in ["stop", "bye", "exit", "goodbye"]): return "Goodbye, sir!"
+    return "I didn't understand that. Try: increase volume, battery status, take a screenshot, open YouTube, open downloads folder."
+
+# ── VOICE SESSION ────────────────────────────────────────────
+def run_active_session():
+    speak_listening(); misses = 0
+    while True:
+        cmd = listen_for_command(timeout=9)
+        if not cmd:
+            misses += 1
+            if misses == 1: speak("Still here.")
+            elif misses == 2: speak("I'm listening, sir.")
+            elif misses >= 3: speak("Going to sleep. Say Jarvis to wake me."); return
+            continue
+        misses = 0
+        if is_full_exit(cmd): speak("Shutting down. Goodbye!"); raise SystemExit(0)
+        if is_session_end(cmd): speak("Sleep mode. Call me anytime."); return
+        print(f"🔄 {cmd}")
+        try:
+            resp = ask_jarvis(cmd)
+        except Exception as e:
+            print(f"❌ {e}"); speak("An error occurred. Please try again."); continue
+        if resp: speak(resp)
+        else: speak_done()
+        time.sleep(0.3); speak_waiting()
+
+# ── FLASK API ────────────────────────────────────────────────
+flask_app = Flask(__name__)
+CORS(flask_app)
+
+@flask_app.route("/ping")
+def ping(): return jsonify({"status": "ok", "version": "4.1"})
+
+@flask_app.route("/command", methods=["POST"])
+def command():
+    data  = request.get_json(force=True, silent=True) or {}
+    text  = data.get("text", "").strip()
+    if not text: return jsonify({"reply": "You didn't say anything, sir."}), 400
+    reply = ask_jarvis(text)
+    return jsonify({"reply": reply or "All done, sir!"})
+
+# ── MAIN ─────────────────────────────────────────────────────
+def greet_user():
+    h    = datetime.datetime.now().hour
+    name = prefs.get("name", "Boss")
+    if h < 12:   g = f"Good morning, {name}! Jarvis is ready."
+    elif h < 17: g = f"Good afternoon, {name}! Jarvis is at your service."
+    else:        g = f"Good evening, {name}! Jarvis reporting for duty."
+    prefs["greeting_count"] = prefs.get("greeting_count", 0) + 1
+    if prefs["greeting_count"] > 5: g += " Welcome back!"
+    save_prefs(prefs); speak(g)
+
+def main():
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║         JARVIS v4.1 — Flask + Groq + English Voice          ║
+╚══════════════════════════════════════════════════════════════╝""")
+    if GROQ_API_KEY: print("✅ Groq API — Full AI mode")
+    else:            print("⚠️  No Groq key — Basic fallback. Set GROQ_API_KEY in .env")
+    greet_user()
+
+    # Uncomment to enable background voice wake-word detection:
+    # def voice_loop():
+    #     while True:
+    #         listen_for_wake_word()
+    #         run_active_session()
+    # threading.Thread(target=voice_loop, daemon=True).start()
+
+    print("\n🌐 http://localhost:5000 — Open jarvis.html in Chrome.\n")
+    flask_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+
+if __name__ == "__main__":
+    main()
